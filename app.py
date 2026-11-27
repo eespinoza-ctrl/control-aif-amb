@@ -551,7 +551,7 @@ def cargar_datos_mano_obra(nombre_hoja="MANO DE OBRA"):
 
     return df.sort_values("Orden_Periodo").reset_index(drop=True)
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600, show_spinner="Descargando base histórica JAC desde Drive...")
 def cargar_datos_historicos_jac():
     try:
         gc = _obtener_cliente_gspread()
@@ -567,9 +567,9 @@ def cargar_datos_historicos_jac():
             creds = _obtener_credenciales_drive()
             session = AuthorizedSession(creds)
             url = f"https://www.googleapis.com/drive/v3/files/{ID_HISTORICOS_JAC}?alt=media"
-            resp = session.get(url, timeout=30)
+            resp = session.get(url, timeout=(15, 120))
             resp.raise_for_status()
-            df = pd.read_excel(io.BytesIO(resp.content), sheet_name=0)
+            df = pd.read_excel(io.BytesIO(resp.content), sheet_name=0, engine="openpyxl")
         else:
             raise e
 
@@ -578,9 +578,9 @@ def cargar_datos_historicos_jac():
 
     df.columns = [" ".join(str(c).replace('\n', ' ').strip().split()) for c in df.columns]
     df = df.loc[:, ~df.columns.str.upper().str.startswith("UNNAMED")].copy()
-    df = df[df.apply(lambda row: any(str(v).strip() not in ["", "nan", "None"] for v in row), axis=1)].reset_index(drop=True)
+    df = df.dropna(how="all").reset_index(drop=True)
 
-    # Normalización de Año
+    # Normalización vectorizada de Año
     col_anio = next((c for c in df.columns if c.upper() in ["AÑO", "ANO"]), None)
     if col_anio:
         df["Año_Clean"] = df[col_anio].fillna("").astype(str).str.replace(".0", "", regex=False).str.strip()
@@ -588,43 +588,45 @@ def cargar_datos_historicos_jac():
     else:
         df["Año_Clean"] = "Sin Año"
 
-    # Normalización de Pasajeros y Carga
+    # Normalización vectorizada de Pasajeros y Carga
     col_pax = next((c for c in df.columns if c.upper() == "PASAJEROS"), None)
-    df["Pasajeros_Num"] = df[col_pax].apply(_limpiar_numero_pax) if col_pax else 0.0
+    if col_pax:
+        s_pax = pd.to_numeric(df[col_pax], errors="coerce")
+        df["Pasajeros_Num"] = s_pax.fillna(df[col_pax].apply(_limpiar_numero_pax))
+    else:
+        df["Pasajeros_Num"] = 0.0
 
     col_carga = next((c for c in df.columns if "CARGA" in c.upper()), None)
-    df["Carga_Num"] = df[col_carga].apply(_limpiar_numero_pax) if col_carga else 0.0
+    if col_carga:
+        s_carga = pd.to_numeric(df[col_carga], errors="coerce")
+        df["Carga_Num"] = s_carga.fillna(df[col_carga].apply(_limpiar_numero_pax))
+    else:
+        df["Carga_Num"] = 0.0
 
     # Normalización de Operador
     col_op = next((c for c in df.columns if c.upper() == "OPERADOR"), None)
     df["Operador_Filtro"] = df[col_op].fillna("").astype(str).str.strip().replace("", "SIN OPERADOR") if col_op else "SIN OPERADOR"
 
-    # Normalización de Origen (ORIG_1 + ORIG_1_N)
+    # Normalización vectorizada de Origen (ORIG_1 + ORIG_1_N)
     col_o1 = next((c for c in df.columns if c.upper() == "ORIG_1"), None)
     col_o1_n = next((c for c in df.columns if c.upper() == "ORIG_1_N"), None)
     if col_o1 and col_o1_n:
         cod_o = df[col_o1].fillna("").astype(str).str.strip()
         nom_o = df[col_o1_n].fillna("").astype(str).str.strip()
-        df["Origen_Filtro"] = [
-            f"{c} - {n}" if (c and n and c != n) else (n or c or "SIN ORIGEN")
-            for c, n in zip(cod_o, nom_o)
-        ]
+        df["Origen_Filtro"] = (cod_o + " - " + nom_o).where((cod_o != "") & (nom_o != "") & (cod_o != nom_o), nom_o.where(nom_o != "", cod_o)).replace("", "SIN ORIGEN")
     elif col_o1_n or col_o1:
         c_use = col_o1_n or col_o1
         df["Origen_Filtro"] = df[c_use].fillna("").astype(str).str.strip().replace("", "SIN ORIGEN")
     else:
         df["Origen_Filtro"] = "SIN ORIGEN"
 
-    # Normalización de Destino (DEST_1 + DEST_1_N)
+    # Normalización vectorizada de Destino (DEST_1 + DEST_1_N)
     col_d1 = next((c for c in df.columns if c.upper() == "DEST_1"), None)
     col_d1_n = next((c for c in df.columns if c.upper() == "DEST_1_N"), None)
     if col_d1 and col_d1_n:
         cod_d = df[col_d1].fillna("").astype(str).str.strip()
         nom_d = df[col_d1_n].fillna("").astype(str).str.strip()
-        df["Destino_Filtro"] = [
-            f"{c} - {n}" if (c and n and c != n) else (n or c or "SIN DESTINO")
-            for c, n in zip(cod_d, nom_d)
-        ]
+        df["Destino_Filtro"] = (cod_d + " - " + nom_d).where((cod_d != "") & (nom_d != "") & (cod_d != nom_d), nom_d.where(nom_d != "", cod_d)).replace("", "SIN DESTINO")
     elif col_d1_n or col_d1:
         c_use = col_d1_n or col_d1
         df["Destino_Filtro"] = df[c_use].fillna("").astype(str).str.strip().replace("", "SIN DESTINO")
