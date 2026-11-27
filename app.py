@@ -8,6 +8,7 @@ import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import AuthorizedSession
+from PIL import Image
 from docx import Document
 from docx.shared import Inches, Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -24,6 +25,7 @@ ID_EXTINTORES = "1dvGof6Q2ftsnqvJ3X04U8D4MZTbox8j4E2T6xJcPBTw"            # <---
 ID_MULTAS = "1A3osOqlI6w05vYLeos4WiEL7hJkYqJW-EjIhzVuxzZg"                    # <--- ID MULTAS AQUÍ
 ID_CORRESPONDENCIA = "17ql7AXNTGxXkzyv7GaFHPNDQiJ57SMBX"  # <--- ID CORRESPONDENCIA AQUÍ
 ID_RESUMEN_AMB = "10vBXajbTph0M9IDJhbd32-0hRCE12gzWH1QSjFEA26M"          # <--- ID RESUMEN AMB AQUÍ
+ID_HISTORICOS_JAC = "1U3JiVuxjDcvaIoLw9XkW3JKfuh-8_3Pc"    # <--- ID HISTÓRICOS JAC AQUÍ
 
 # ==========================================
 # RUTAS, AUTENTICACIÓN CLOUD/LOCAL Y LOGO
@@ -136,7 +138,6 @@ def _agregar_tabla_antecedentes(doc, filas_datos):
     return tabla
 
 def _insertar_evidencia_fotografica(celda_foto, fotos_raw):
-    from PIL import Image
     p_foto = celda_foto.paragraphs[0]
     _aplicar_fuente(p_foto.add_run("EVIDENCIA FOTOGRÁFICA\n"), negrita=True)
 
@@ -158,16 +159,13 @@ def _insertar_evidencia_fotografica(celda_foto, fotos_raw):
                     file_id = None
 
                 if file_id:
-                    # 1. Descarga autenticada vía API oficial de Google Drive
                     url_api = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
                     respuesta = session.get(url_api, timeout=20)
 
-                    # 2. Respaldo por enlace directo si no está compartida con la cuenta de servicio
                     if respuesta.status_code != 200 or "text/html" in respuesta.headers.get("Content-Type", ""):
                         respuesta = requests.get(f"https://drive.google.com/uc?export=download&id={file_id}", timeout=20)
 
                     if respuesta.status_code == 200 and "text/html" not in respuesta.headers.get("Content-Type", ""):
-                        # 3. Normaliza cualquier formato (WebP, PNG, RGBA) a JPEG compatible con Word
                         img = Image.open(io.BytesIO(respuesta.content))
                         if img.mode in ("RGBA", "P"):
                             img = img.convert("RGB")
@@ -185,6 +183,7 @@ def _insertar_evidencia_fotografica(celda_foto, fotos_raw):
                 _aplicar_fuente(p_foto.add_run(f"\n(Error al procesar foto: {e})"))
     else:
         _aplicar_fuente(p_foto.add_run("\nSin registro fotográfico adjunto."))
+
 def _agregar_bloque_campos(celda, bloques):
     p = celda.paragraphs[0]
     for idx_b, (titulo_b, campos) in enumerate(bloques):
@@ -385,7 +384,7 @@ def cargar_datos_correspondencia():
 
     return df
 
-# --- 5. RESUMEN AMB (SOPORTA GOOGLE SHEETS NATIVO Y .XLSX EN DRIVE) ---
+# --- 5. RESUMEN AMB (PASAJEROS, MANO DE OBRA E HISTÓRICOS JAC) ---
 def _limpiar_numero_pax(val, corregir_miles_sheet=False):
     if isinstance(val, (int, float)):
         num = float(val)
@@ -551,6 +550,88 @@ def cargar_datos_mano_obra(nombre_hoja="MANO DE OBRA"):
     df["Periodo"] = df["AÑO"] + "-" + df["Mes_Num"].astype(str).str.zfill(2) + " (" + df["MES"] + ")"
 
     return df.sort_values("Orden_Periodo").reset_index(drop=True)
+
+@st.cache_data(ttl=600)
+def cargar_datos_historicos_jac():
+    try:
+        gc = _obtener_cliente_gspread()
+        sh = gc.open_by_key(ID_HISTORICOS_JAC)
+        worksheet = sh.sheet1
+        datos_crudos = worksheet.get_all_values()
+        if not datos_crudos or len(datos_crudos) < 2:
+            return pd.DataFrame()
+        datos_puros = worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
+        df = pd.DataFrame(datos_puros[1:], columns=datos_crudos[0])
+    except gspread.exceptions.APIError as e:
+        if "400" in str(e):
+            creds = _obtener_credenciales_drive()
+            session = AuthorizedSession(creds)
+            url = f"https://www.googleapis.com/drive/v3/files/{ID_HISTORICOS_JAC}?alt=media"
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+            df = pd.read_excel(io.BytesIO(resp.content), sheet_name=0)
+        else:
+            raise e
+
+    if df.empty:
+        return df
+
+    df.columns = [" ".join(str(c).replace('\n', ' ').strip().split()) for c in df.columns]
+    df = df.loc[:, ~df.columns.str.upper().str.startswith("UNNAMED")].copy()
+    df = df[df.apply(lambda row: any(str(v).strip() not in ["", "nan", "None"] for v in row), axis=1)].reset_index(drop=True)
+
+    # Normalización de Año
+    col_anio = next((c for c in df.columns if c.upper() in ["AÑO", "ANO"]), None)
+    if col_anio:
+        df["Año_Clean"] = df[col_anio].fillna("").astype(str).str.replace(".0", "", regex=False).str.strip()
+        df = df[df["Año_Clean"].str.match(r"^\d{4}$", na=False)].reset_index(drop=True)
+    else:
+        df["Año_Clean"] = "Sin Año"
+
+    # Normalización de Pasajeros y Carga
+    col_pax = next((c for c in df.columns if c.upper() == "PASAJEROS"), None)
+    df["Pasajeros_Num"] = df[col_pax].apply(_limpiar_numero_pax) if col_pax else 0.0
+
+    col_carga = next((c for c in df.columns if "CARGA" in c.upper()), None)
+    df["Carga_Num"] = df[col_carga].apply(_limpiar_numero_pax) if col_carga else 0.0
+
+    # Normalización de Operador
+    col_op = next((c for c in df.columns if c.upper() == "OPERADOR"), None)
+    df["Operador_Filtro"] = df[col_op].fillna("").astype(str).str.strip().replace("", "SIN OPERADOR") if col_op else "SIN OPERADOR"
+
+    # Normalización de Origen (ORIG_1 + ORIG_1_N)
+    col_o1 = next((c for c in df.columns if c.upper() == "ORIG_1"), None)
+    col_o1_n = next((c for c in df.columns if c.upper() == "ORIG_1_N"), None)
+    if col_o1 and col_o1_n:
+        cod_o = df[col_o1].fillna("").astype(str).str.strip()
+        nom_o = df[col_o1_n].fillna("").astype(str).str.strip()
+        df["Origen_Filtro"] = [
+            f"{c} - {n}" if (c and n and c != n) else (n or c or "SIN ORIGEN")
+            for c, n in zip(cod_o, nom_o)
+        ]
+    elif col_o1_n or col_o1:
+        c_use = col_o1_n or col_o1
+        df["Origen_Filtro"] = df[c_use].fillna("").astype(str).str.strip().replace("", "SIN ORIGEN")
+    else:
+        df["Origen_Filtro"] = "SIN ORIGEN"
+
+    # Normalización de Destino (DEST_1 + DEST_1_N)
+    col_d1 = next((c for c in df.columns if c.upper() == "DEST_1"), None)
+    col_d1_n = next((c for c in df.columns if c.upper() == "DEST_1_N"), None)
+    if col_d1 and col_d1_n:
+        cod_d = df[col_d1].fillna("").astype(str).str.strip()
+        nom_d = df[col_d1_n].fillna("").astype(str).str.strip()
+        df["Destino_Filtro"] = [
+            f"{c} - {n}" if (c and n and c != n) else (n or c or "SIN DESTINO")
+            for c, n in zip(cod_d, nom_d)
+        ]
+    elif col_d1_n or col_d1:
+        c_use = col_d1_n or col_d1
+        df["Destino_Filtro"] = df[c_use].fillna("").astype(str).str.strip().replace("", "SIN DESTINO")
+    else:
+        df["Destino_Filtro"] = "SIN DESTINO"
+
+    return df
 
 # ==========================================
 # FUNCIONES GENERADORAS DE INFORMES WORD
@@ -761,9 +842,10 @@ tab_resumen_amb, tab_paco, tab_extintores, tab_multas, tab_correspondencia = st.
 with tab_resumen_amb:
     st.header("📊 Resumen AMB")
 
-    subtab_pax, subtab_mo = st.tabs([
+    subtab_pax, subtab_mo, subtab_jac = st.tabs([
         "🛫 Pasajeros Embarcados (DGAC)",
-        "👷 Evolutivo Mano de Obra"
+        "👷 Evolutivo Mano de Obra",
+        "📈 Históricos JAC"
     ])
 
     # --- SUB-PESTAÑA 1: PASAJEROS EMBARCADOS DGAC ---
@@ -1048,6 +1130,148 @@ with tab_resumen_amb:
 
         except Exception as e:
             st.error(f"Error en el módulo Resumen AMB (Mano de Obra): {e}")
+
+    # --- SUB-PESTAÑA 3: HISTÓRICOS JAC ---
+    with subtab_jac:
+        try:
+            df_jac = cargar_datos_historicos_jac()
+
+            if df_jac.empty:
+                st.warning("La planilla de Históricos JAC se conectó correctamente, pero actualmente no tiene registros.")
+            else:
+                # --- FILTROS: OPERADOR, ORIGEN Y DESTINO ---
+                f_jac1, f_jac2, f_jac3 = st.columns(3)
+                with f_jac1:
+                    operadores_jac = sorted(df_jac["Operador_Filtro"].dropna().unique().tolist())
+                    op_jac_sel = st.selectbox(
+                        "✈️ Filtrar por Operador:",
+                        ["TODOS (Consolidado)"] + operadores_jac,
+                        key="op_historicos_jac"
+                    )
+
+                df_jac_step1 = df_jac.copy()
+                if op_jac_sel != "TODOS (Consolidado)":
+                    df_jac_step1 = df_jac_step1[df_jac_step1["Operador_Filtro"] == op_jac_sel]
+
+                with f_jac2:
+                    origenes_jac = sorted(df_jac_step1["Origen_Filtro"].dropna().unique().tolist())
+                    orig_jac_sel = st.selectbox(
+                        "🛫 Filtrar por Origen (ORIG_1):",
+                        ["TODOS"] + origenes_jac,
+                        key="orig_historicos_jac"
+                    )
+
+                df_jac_step2 = df_jac_step1.copy()
+                if orig_jac_sel != "TODOS":
+                    df_jac_step2 = df_jac_step2[df_jac_step2["Origen_Filtro"] == orig_jac_sel]
+
+                with f_jac3:
+                    destinos_jac = sorted(df_jac_step2["Destino_Filtro"].dropna().unique().tolist())
+                    dest_jac_sel = st.selectbox(
+                        "🛬 Filtrar por Destino (DEST_1):",
+                        ["TODOS"] + destinos_jac,
+                        key="dest_historicos_jac"
+                    )
+
+                df_jac_filt = df_jac_step2.copy()
+                if dest_jac_sel != "TODOS":
+                    df_jac_filt = df_jac_filt[df_jac_filt["Destino_Filtro"] == dest_jac_sel]
+
+                if df_jac_filt.empty:
+                    st.info("No hay registros históricos JAC para la combinación de filtros seleccionada.")
+                else:
+                    # --- TARJETAS KPI ---
+                    tot_pax_jac = df_jac_filt["Pasajeros_Num"].sum()
+                    tot_carga_jac = df_jac_filt["Carga_Num"].sum()
+                    cant_operadores = df_jac_filt["Operador_Filtro"].nunique()
+
+                    df_anual_jac = (
+                        df_jac_filt.groupby("Año_Clean", as_index=False)["Pasajeros_Num"]
+                        .sum()
+                        .sort_values("Año_Clean")
+                    )
+                    ultimo_anio_row = df_anual_jac.iloc[-1]
+
+                    j1, j2, j3, j4 = st.columns(4)
+                    j1.metric("👥 Total Pasajeros (Histórico)", f"{tot_pax_jac:,.0f}".replace(",", "."))
+                    j2.metric(f"📅 Pasajeros Año {ultimo_anio_row['Año_Clean']}", f"{ultimo_anio_row['Pasajeros_Num']:,.0f}".replace(",", "."))
+                    j3.metric("📦 Carga Total (Ton)", f"{tot_carga_jac:,.1f}".replace(",", "."))
+                    j4.metric("🏢 Operadores en Filtro", f"{cant_operadores:,}".replace(",", "."))
+
+                    st.divider()
+
+                    # --- GRÁFICO DE EVOLUCIÓN ANUAL DE TRÁFICO AÉREO DE PASAJEROS ---
+                    st.subheader("📈 Evolución Anual de Tráfico Aéreo de Pasajeros (Total)")
+                    fig_jac = px.bar(
+                        df_anual_jac,
+                        x="Año_Clean",
+                        y="Pasajeros_Num",
+                        text_auto=".3s",
+                        color="Pasajeros_Num",
+                        color_continuous_scale="Blues"
+                    )
+                    fig_jac.update_traces(
+                        textposition="outside",
+                        hovertemplate="<b>Año %{x}</b><br>Pasajeros: %{y:,.0f}<extra></extra>"
+                    )
+                    fig_jac.update_xaxes(type="category")
+                    fig_jac.update_layout(
+                        xaxis_title="Año",
+                        yaxis_title="Total Pasajeros",
+                        coloraxis_showscale=False
+                    )
+                    st.plotly_chart(fig_jac, use_container_width=True)
+
+                    # --- GRÁFICO SECUNDARIO: DESGLOSE NACIONAL VS INTERNACIONAL SI EXISTE COLUMNA NAC ---
+                    col_nac = next((c for c in df_jac_filt.columns if c.upper() == "NAC"), None)
+                    if col_nac and df_jac_filt[col_nac].astype(str).str.strip().replace("", pd.NA).dropna().nunique() > 1:
+                        st.subheader("🌎 Evolución Anual por Tipo de Tráfico (NAC)")
+                        df_jac_nac = df_jac_filt.copy()
+                        df_jac_nac["Tipo_NAC"] = df_jac_nac[col_nac].fillna("").astype(str).str.strip().replace("", "SIN CLASIFICAR")
+                        df_anual_nac = (
+                            df_jac_nac.groupby(["Año_Clean", "Tipo_NAC"], as_index=False)["Pasajeros_Num"]
+                            .sum()
+                            .sort_values("Año_Clean")
+                        )
+                        fig_jac_nac = px.line(
+                            df_anual_nac,
+                            x="Año_Clean",
+                            y="Pasajeros_Num",
+                            color="Tipo_NAC",
+                            markers=True
+                        )
+                        fig_jac_nac.update_xaxes(type="category")
+                        fig_jac_nac.update_layout(xaxis_title="Año", yaxis_title="Total Pasajeros", legend_title="Clasificación")
+                        st.plotly_chart(fig_jac_nac, use_container_width=True)
+
+                    st.divider()
+
+                    # --- TABLA DE DETALLE Y DESCARGA EXCEL ---
+                    st.subheader("📋 Detalle de Registros JAC")
+                    cols_ocultas_jac = ["Año_Clean", "Pasajeros_Num", "Carga_Num", "Operador_Filtro", "Origen_Filtro", "Destino_Filtro"]
+                    df_jac_mostrar = df_jac_filt.drop(columns=[c for c in cols_ocultas_jac if c in df_jac_filt.columns], errors="ignore")
+
+                    st.dataframe(df_jac_mostrar.head(1000), use_container_width=True, hide_index=True)
+                    if len(df_jac_mostrar) > 1000:
+                        st.caption(f"Mostrando los primeros 1.000 de {len(df_jac_mostrar):,} registros filtrados. Descarga el Excel para obtener la base filtrada completa.".replace(",", "."))
+
+                    buffer_excel_jac = io.BytesIO()
+                    with pd.ExcelWriter(buffer_excel_jac, engine="openpyxl") as writer:
+                        df_jac_mostrar.to_excel(writer, index=False, sheet_name="Historicos_JAC")
+                    buffer_excel_jac.seek(0)
+
+                    etiqueta_jac = f"{op_jac_sel}_{orig_jac_sel}_{dest_jac_sel}".replace(" ", "_").replace("(", "").replace(")", "").replace("/", "-")[:60]
+                    st.download_button(
+                        label=f"📥 Descargar Excel Históricos JAC ({len(df_jac_mostrar):,} registros)".replace(",", "."),
+                        data=buffer_excel_jac,
+                        file_name=f"Historicos_JAC_{etiqueta_jac}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="btn_excel_jac"
+                    )
+
+        except Exception as e:
+            st.error(f"Error en el módulo Históricos JAC: {e}")
 
 # ==========================================
 # MÓDULO 2: FISCALIZACIÓN PACO
