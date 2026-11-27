@@ -369,9 +369,12 @@ def cargar_datos_correspondencia():
     return df
 
 # --- 5. RESUMEN AMB (SOPORTA GOOGLE SHEETS NATIVO Y .XLSX EN DRIVE) ---
-def _limpiar_numero_pax(val):
+def _limpiar_numero_pax(val, corregir_miles_sheet=False):
     if isinstance(val, (int, float)):
-        return float(val)
+        num = float(val)
+        if corregir_miles_sheet and not num.is_integer():
+            return float(round(num * 1000))
+        return num
     v = str(val).strip().replace(' ', '')
     if not v or v.upper() in ['NAN', 'NONE', '-', 'N/A']:
         return 0.0
@@ -385,7 +388,10 @@ def _limpiar_numero_pax(val):
         partes = v.split(',')
         v = v.replace(',', '') if (len(partes[-1]) == 3 and all(p.lstrip('-').isdigit() for p in partes)) else v.replace(',', '.')
     try:
-        return float(v)
+        num = float(v)
+        if corregir_miles_sheet and not num.is_integer():
+            return float(round(num * 1000))
+        return num
     except Exception:
         return 0.0
 
@@ -483,7 +489,8 @@ def cargar_datos_resumen_pax(nombre_hoja="PASAJEROS EMBARCADOS DGAC"):
         if col in cols_texto:
             df[col] = df[col].fillna("").astype(str).str.strip()
         else:
-            df[col] = df[col].apply(_limpiar_numero_pax)
+            es_regularizacion = "REGULARIZACION" in col.upper()
+            df[col] = df[col].apply(lambda x: _limpiar_numero_pax(x, corregir_miles_sheet=not es_regularizacion))
 
     if col_mes:
         df = df[~df[col_mes].str.upper().str.contains("TOTAL|ACUMULADO", na=False)].reset_index(drop=True)
@@ -694,23 +701,23 @@ def generar_informe_word_correspondencia(periodo_sel, estado_sel, area_sel, df_r
     buffer.seek(0)
     return buffer
 
-def generar_informe_word_resumen_pax(anio_sel, df_resumen, tot_dom, tot_int, tot_emb, tot_ajus):
+def generar_informe_word_resumen_pax(periodo_sel, df_resumen, tot_dom, tot_int, tot_emb, tot_ajus):
     hoy_str = pd.Timestamp.now(tz='America/Santiago').strftime('%d/%m/%Y %H:%M')
     doc = _crear_documento_base('Informe Resumen AMB - Pasajeros Embarcados (DGAC).')
 
     _agregar_titulo_seccion(doc, '1. Antecedentes Generales')
     _agregar_tabla_antecedentes(doc, [
-        ("Período Consultado", anio_sel),
+        ("Período Consultado", periodo_sel),
         ("Meses Registrados", str(len(df_resumen))),
         ("Fecha de Emisión", hoy_str),
     ])
 
     _agregar_titulo_seccion(doc, '2. Totales Consolidados de Pasajeros')
     _agregar_tabla_antecedentes(doc, [
-        ("Total Doméstico", f"{tot_dom:,.0f} pax"),
-        ("Total Internacional", f"{tot_int:,.0f} pax"),
-        ("Total Embarcados Mes", f"{tot_emb:,.0f} pax"),
-        ("Total Pasajeros Ajustados", f"{tot_ajus:,.0f} pax"),
+        ("Total Doméstico", f"{tot_dom:,.0f} pax".replace(",", ".")),
+        ("Total Internacional", f"{tot_int:,.0f} pax".replace(",", ".")),
+        ("Total Embarcados Mes", f"{tot_emb:,.0f} pax".replace(",", ".")),
+        ("Total Pasajeros Ajustados", f"{tot_ajus:,.0f} pax".replace(",", ".")),
     ])
 
     buffer = io.BytesIO()
@@ -749,33 +756,71 @@ with tab_resumen_amb:
                 st.warning("La hoja 'PASAJEROS EMBARCADOS DGAC' se conectó correctamente, pero actualmente no tiene registros.")
             else:
                 col_mes = next((c for c in df_pax.columns if "MES" in c.upper()), df_pax.columns[0])
+                col_oficio = next((c for c in df_pax.columns if "CARTA" in c.upper() or "OFICIO" in c.upper()), None)
                 col_tot_dom = next((c for c in df_pax.columns if "TOTAL DOM" in c.upper()), None)
                 col_tot_int = next((c for c in df_pax.columns if "TOTAL INT" in c.upper()), None)
                 col_tot_emb = next((c for c in df_pax.columns if "EMBARCADOS" in c.upper()), None)
                 col_tot_aju = next((c for c in df_pax.columns if "AJUSTADOS" in c.upper()), None)
 
-                anios_disp = sorted(df_pax["Año_Filtro"].dropna().unique().tolist(), reverse=True)
-                anio_sel = st.selectbox(
-                    "📅 Filtrar por Año:",
-                    ["Acumulado Histórico (Todos)"] + anios_disp,
-                    key="anio_resumen_pax"
-                )
+                # --- DOBLE FILTRO: AÑO Y MES ---
+                f_pax1, f_pax2 = st.columns(2)
+                with f_pax1:
+                    anios_disp = sorted(df_pax["Año_Filtro"].dropna().unique().tolist(), reverse=True)
+                    anio_sel = st.selectbox(
+                        "📅 Filtrar por Año:",
+                        ["Todos los Años"] + anios_disp,
+                        key="anio_resumen_pax"
+                    )
 
-                if anio_sel != "Acumulado Histórico (Todos)":
-                    df_pax_filt = df_pax[df_pax["Año_Filtro"] == anio_sel].copy()
+                if anio_sel != "Todos los Años":
+                    df_base_meses = df_pax[df_pax["Año_Filtro"] == anio_sel].copy()
                 else:
-                    df_pax_filt = df_pax.copy()
+                    df_base_meses = df_pax.copy()
 
+                with f_pax2:
+                    meses_disp = df_base_meses[col_mes].dropna().unique().tolist()[::-1]
+                    mes_pax_sel = st.selectbox(
+                        "📆 Filtrar por Mes / Período:",
+                        ["Todos los Meses (Acumulado)"] + meses_disp,
+                        key="mes_resumen_pax"
+                    )
+
+                if mes_pax_sel != "Todos los Meses (Acumulado)":
+                    df_pax_filt = df_base_meses[df_base_meses[col_mes] == mes_pax_sel].copy()
+                    etiqueta_periodo_pax = mes_pax_sel
+                else:
+                    df_pax_filt = df_base_meses.copy()
+                    etiqueta_periodo_pax = "Acumulado Histórico" if anio_sel == "Todos los Años" else f"Año {anio_sel}"
+
+                # --- BLOQUE KPI 1: TOTAL HISTÓRICO / PERÍODO FILTRADO ---
                 tot_dom = pd.to_numeric(df_pax_filt[col_tot_dom], errors="coerce").fillna(0).sum() if col_tot_dom else 0.0
                 tot_int = pd.to_numeric(df_pax_filt[col_tot_int], errors="coerce").fillna(0).sum() if col_tot_int else 0.0
                 tot_emb = pd.to_numeric(df_pax_filt[col_tot_emb], errors="coerce").fillna(0).sum() if col_tot_emb else 0.0
                 tot_aju = pd.to_numeric(df_pax_filt[col_tot_aju], errors="coerce").fillna(0).sum() if col_tot_aju else 0.0
 
+                st.subheader(f"📊 Total Acumulado ({etiqueta_periodo_pax})")
                 k1, k2, k3, k4 = st.columns(4)
-                k1.metric("🇨🇱 Total Doméstico", f"{tot_dom:,.0f}")
-                k2.metric("🌎 Total Internacional", f"{tot_int:,.0f}")
-                k3.metric("🛫 Total Embarcados", f"{tot_emb:,.0f}")
-                k4.metric("✅ Pasajeros Ajustados", f"{tot_aju:,.0f}")
+                k1.metric("🇨🇱 Total Doméstico", f"{tot_dom:,.0f}".replace(",", "."))
+                k2.metric("🌎 Total Internacional", f"{tot_int:,.0f}".replace(",", "."))
+                k3.metric("🛫 Total Embarcados", f"{tot_emb:,.0f}".replace(",", "."))
+                k4.metric("✅ Pasajeros Ajustados", f"{tot_aju:,.0f}".replace(",", "."))
+
+                # --- BLOQUE KPI 2: ÚLTIMO MES CARGADO EN LA BASE ---
+                ultima_fila = df_pax.iloc[-1]
+                ult_mes_nombre = str(ultima_fila[col_mes])
+                ult_oficio_txt = f" | {ultima_fila[col_oficio]}" if col_oficio and str(ultima_fila[col_oficio]).strip() else ""
+                ult_dom = float(ultima_fila[col_tot_dom]) if col_tot_dom else 0.0
+                ult_int = float(ultima_fila[col_tot_int]) if col_tot_int else 0.0
+                ult_emb = float(ultima_fila[col_tot_emb]) if col_tot_emb else 0.0
+                ult_aju = float(ultima_fila[col_tot_aju]) if col_tot_aju else 0.0
+
+                st.subheader(f"🗓️ Último Mes Cargado: {ult_mes_nombre}{ult_oficio_txt}")
+                u1, u2, u3, u4 = st.columns(4)
+                u1.metric("🇨🇱 Doméstico (Último Mes)", f"{ult_dom:,.0f}".replace(",", "."))
+                u2.metric("🌎 Internacional (Último Mes)", f"{ult_int:,.0f}".replace(",", "."))
+                u3.metric("🛫 Embarcados (Último Mes)", f"{ult_emb:,.0f}".replace(",", "."))
+                u4.metric("✅ Ajustados (Último Mes)", f"{ult_aju:,.0f}".replace(",", "."))
+
                 st.divider()
 
                 g1, g2 = st.columns([2, 1])
@@ -826,10 +871,13 @@ with tab_resumen_amb:
 
                 st.subheader("📋 Detalle Mensual Comunicado por DGAC")
                 df_pax_mostrar = df_pax_filt.drop(columns=["Año_Filtro"], errors="ignore")
-                st.dataframe(df_pax_mostrar, use_container_width=True, hide_index=True)
+                df_pax_visual = df_pax_mostrar.copy()
+                for c in df_pax_visual.select_dtypes(include="number").columns:
+                    df_pax_visual[c] = df_pax_visual[c].apply(lambda x: f"{x:,.0f}".replace(",", "."))
+                st.dataframe(df_pax_visual, use_container_width=True, hide_index=True)
 
                 c_dl1, c_dl2 = st.columns(2)
-                etiqueta_pax = anio_sel.replace(" ", "_")
+                etiqueta_pax = etiqueta_periodo_pax.replace(" ", "_")
 
                 with c_dl1:
                     buffer_excel_pax = io.BytesIO()
@@ -848,7 +896,7 @@ with tab_resumen_amb:
 
                 with c_dl2:
                     buffer_word_pax = generar_informe_word_resumen_pax(
-                        anio_sel, df_pax_mostrar, tot_dom, tot_int, tot_emb, tot_aju
+                        etiqueta_periodo_pax, df_pax_mostrar, tot_dom, tot_int, tot_emb, tot_aju
                     )
                     st.download_button(
                         label="📄 Descargar Informe Ejecutivo (Word .docx)",
@@ -870,7 +918,7 @@ with tab_resumen_amb:
             if df_mo.empty:
                 st.warning("La hoja 'MANO DE OBRA' se conectó correctamente, pero actualmente no tiene registros.")
             else:
-                f_mo1, f_mo2 = st.columns(2)
+                f_mo1, f_mo2, f_mo3 = st.columns(3)
                 with f_mo1:
                     entidades_mo = sorted(df_mo["ENTIDAD"].dropna().unique().tolist())
                     entidad_sel = st.selectbox(
@@ -886,11 +934,29 @@ with tab_resumen_amb:
                         key="anio_resumen_mo"
                     )
 
-                df_mo_filt = df_mo.copy()
+                df_mo_base = df_mo.copy()
                 if entidad_sel != "TODAS (Consolidado)":
-                    df_mo_filt = df_mo_filt[df_mo_filt["ENTIDAD"] == entidad_sel]
+                    df_mo_base = df_mo_base[df_mo_base["ENTIDAD"] == entidad_sel]
                 if anio_mo_sel != "Todos los Años":
-                    df_mo_filt = df_mo_filt[df_mo_filt["AÑO"] == anio_mo_sel]
+                    df_mo_base = df_mo_base[df_mo_base["AÑO"] == anio_mo_sel]
+
+                with f_mo3:
+                    meses_mo_df = (
+                        df_mo_base[["MES", "Mes_Num"]]
+                        .drop_duplicates()
+                        .query("MES != ''")
+                        .sort_values("Mes_Num")
+                    )
+                    meses_mo = meses_mo_df["MES"].tolist()
+                    mes_mo_sel = st.selectbox(
+                        "📆 Filtrar por Mes:",
+                        ["Todos los Meses"] + meses_mo,
+                        key="mes_resumen_mo"
+                    )
+
+                df_mo_filt = df_mo_base.copy()
+                if mes_mo_sel != "Todos los Meses":
+                    df_mo_filt = df_mo_filt[df_mo_filt["MES"] == mes_mo_sel]
 
                 if df_mo_filt.empty:
                     st.info("No hay registros de mano de obra para los filtros seleccionados.")
@@ -903,13 +969,26 @@ with tab_resumen_amb:
                         .sort_values("Orden_Periodo")
                     )
 
-                    ultimo = df_mo_agg.iloc[-1]
-                    st.caption(f"Último período registrado en el filtro: **{ultimo['Periodo']}**")
+                    if mes_mo_sel != "Todos los Meses":
+                        tot_mo_gen = df_mo_filt["TOTAL M.O"].sum()
+                        tot_mo_cal = df_mo_filt["M.O CALIFICADA"].sum()
+                        tot_mo_sem = df_mo_filt["M.O SEMICALIFICADA"].sum()
+                        tot_mo_noc = df_mo_filt["M.O NO CALIFICADA"].sum()
+                        etiqueta_kpi_mo = f"Total Mensual Consultado ({mes_mo_sel} - {anio_mo_sel} | {entidad_sel})"
+                    else:
+                        ultimo = df_mo_agg.iloc[-1]
+                        tot_mo_gen = ultimo["TOTAL M.O"]
+                        tot_mo_cal = ultimo["M.O CALIFICADA"]
+                        tot_mo_sem = ultimo["M.O SEMICALIFICADA"]
+                        tot_mo_noc = ultimo["M.O NO CALIFICADA"]
+                        etiqueta_kpi_mo = f"Total Último Período Registrado ({ultimo['Periodo']} | {entidad_sel})"
+
+                    st.subheader(f"📊 {etiqueta_kpi_mo}")
                     m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("👷 Total M.O", f"{ultimo['TOTAL M.O']:,.0f}")
-                    m2.metric("🎓 M.O Calificada", f"{ultimo['M.O CALIFICADA']:,.0f}")
-                    m3.metric("🛠️ M.O Semicalificada", f"{ultimo['M.O SEMICALIFICADA']:,.0f}")
-                    m4.metric("🧰 M.O No Calificada", f"{ultimo['M.O NO CALIFICADA']:,.0f}")
+                    m1.metric("👷 Total Mensual M.O", f"{tot_mo_gen:,.0f}".replace(",", "."))
+                    m2.metric("🎓 M.O Calificada", f"{tot_mo_cal:,.0f}".replace(",", "."))
+                    m3.metric("🛠️ M.O Semicalificada", f"{tot_mo_sem:,.0f}".replace(",", "."))
+                    m4.metric("🧰 M.O No Calificada", f"{tot_mo_noc:,.0f}".replace(",", "."))
                     st.divider()
 
                     st.subheader("📈 Evolutivo de Mano de Obra")
@@ -945,14 +1024,17 @@ with tab_resumen_amb:
                         "M.O CALIFICADA", "M.O SEMICALIFICADA", "M.O NO CALIFICADA", "TOTAL M.O"
                     ]
                     df_mo_mostrar = df_mo_filt[cols_mostrar_mo].copy()
-                    st.dataframe(df_mo_mostrar, use_container_width=True, hide_index=True)
+                    df_mo_visual = df_mo_mostrar.copy()
+                    for c in ["M.O CALIFICADA", "M.O SEMICALIFICADA", "M.O NO CALIFICADA", "TOTAL M.O"]:
+                        df_mo_visual[c] = df_mo_visual[c].apply(lambda x: f"{x:,.0f}".replace(",", "."))
+                    st.dataframe(df_mo_visual, use_container_width=True, hide_index=True)
 
                     buffer_excel_mo = io.BytesIO()
                     with pd.ExcelWriter(buffer_excel_mo, engine="openpyxl") as writer:
                         df_mo_mostrar.to_excel(writer, index=False, sheet_name="Mano_de_Obra")
                     buffer_excel_mo.seek(0)
 
-                    etiqueta_mo = f"{entidad_sel}_{anio_mo_sel}".replace(" ", "_").replace("(", "").replace(")", "")
+                    etiqueta_mo = f"{entidad_sel}_{anio_mo_sel}_{mes_mo_sel}".replace(" ", "_").replace("(", "").replace(")", "")
                     st.download_button(
                         label=f"📥 Descargar Excel Mano de Obra ({len(df_mo_mostrar)} registros)",
                         data=buffer_excel_mo,
