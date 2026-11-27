@@ -1,6 +1,7 @@
 import os
 import io
 import base64
+import gc as py_gc
 import requests
 import streamlit as st
 import pandas as pd
@@ -551,17 +552,28 @@ def cargar_datos_mano_obra(nombre_hoja="MANO DE OBRA"):
 
     return df.sort_values("Orden_Periodo").reset_index(drop=True)
 
-@st.cache_data(ttl=3600, show_spinner="Descargando base histórica JAC desde Drive...")
+@st.cache_data(ttl=3600, show_spinner="Cargando base histórica JAC...")
 def cargar_datos_historicos_jac():
+    cols_necesarias = {
+        "AÑO", "ANO", "MES", "OPERADOR", "GRUPO",
+        "ORIG_1", "ORIG_1_N", "DEST_1", "DEST_1_N",
+        "NAC", "PASAJEROS", "CARGA (TON)"
+    }
+
     try:
-        gc = _obtener_cliente_gspread()
-        sh = gc.open_by_key(ID_HISTORICOS_JAC)
+        cliente = _obtener_cliente_gspread()
+        sh = cliente.open_by_key(ID_HISTORICOS_JAC)
         worksheet = sh.sheet1
-        datos_crudos = worksheet.get_all_values()
-        if not datos_crudos or len(datos_crudos) < 2:
+        datos = worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
+        if not datos or len(datos) < 2:
             return pd.DataFrame()
-        datos_puros = worksheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
-        df = pd.DataFrame(datos_puros[1:], columns=datos_crudos[0])
+        encabezados = [" ".join(str(c).replace('\n', ' ').strip().split()) for c in datos[0]]
+        indices_validos = [i for i, c in enumerate(encabezados) if c.upper() in cols_necesarias]
+        columnas_filtradas = [encabezados[i] for i in indices_validos]
+        filas_filtradas = [[fila[i] if i < len(fila) else "" for i in indices_validos] for fila in datos[1:]]
+        df = pd.DataFrame(filas_filtradas, columns=columnas_filtradas)
+        del datos, filas_filtradas
+        py_gc.collect()
     except gspread.exceptions.APIError as e:
         if "400" in str(e):
             creds = _obtener_credenciales_drive()
@@ -569,7 +581,16 @@ def cargar_datos_historicos_jac():
             url = f"https://www.googleapis.com/drive/v3/files/{ID_HISTORICOS_JAC}?alt=media"
             resp = session.get(url, timeout=(15, 120))
             resp.raise_for_status()
-            df = pd.read_excel(io.BytesIO(resp.content), sheet_name=0, engine="openpyxl")
+            contenido = io.BytesIO(resp.content)
+            del resp
+            df = pd.read_excel(
+                contenido,
+                sheet_name=0,
+                engine="openpyxl",
+                usecols=lambda c: " ".join(str(c).replace('\n', ' ').strip().split()).upper() in cols_necesarias
+            )
+            contenido.close()
+            py_gc.collect()
         else:
             raise e
 
@@ -577,7 +598,6 @@ def cargar_datos_historicos_jac():
         return df
 
     df.columns = [" ".join(str(c).replace('\n', ' ').strip().split()) for c in df.columns]
-    df = df.loc[:, ~df.columns.str.upper().str.startswith("UNNAMED")].copy()
     df = df.dropna(how="all").reset_index(drop=True)
 
     # Normalización vectorizada de Año
@@ -592,14 +612,14 @@ def cargar_datos_historicos_jac():
     col_pax = next((c for c in df.columns if c.upper() == "PASAJEROS"), None)
     if col_pax:
         s_pax = pd.to_numeric(df[col_pax], errors="coerce")
-        df["Pasajeros_Num"] = s_pax.fillna(df[col_pax].apply(_limpiar_numero_pax))
+        df["Pasajeros_Num"] = s_pax.fillna(df[col_pax].apply(_limpiar_numero_pax)).astype("float32")
     else:
         df["Pasajeros_Num"] = 0.0
 
     col_carga = next((c for c in df.columns if "CARGA" in c.upper()), None)
     if col_carga:
         s_carga = pd.to_numeric(df[col_carga], errors="coerce")
-        df["Carga_Num"] = s_carga.fillna(df[col_carga].apply(_limpiar_numero_pax))
+        df["Carga_Num"] = s_carga.fillna(df[col_carga].apply(_limpiar_numero_pax)).astype("float32")
     else:
         df["Carga_Num"] = 0.0
 
@@ -633,6 +653,7 @@ def cargar_datos_historicos_jac():
     else:
         df["Destino_Filtro"] = "SIN DESTINO"
 
+    py_gc.collect()
     return df
 
 # ==========================================
