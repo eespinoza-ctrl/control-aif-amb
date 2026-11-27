@@ -389,6 +389,20 @@ def _limpiar_numero_pax(val):
     except Exception:
         return 0.0
 
+def _formatear_mes_anio_pax(val):
+    meses_es = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    if isinstance(val, pd.Timestamp):
+        return f"{meses_es[val.month - 1]} {val.year}"
+    s = str(val).strip()
+    try:
+        num = float(s)
+        if 30000 <= num <= 80000:
+            fecha = pd.to_datetime(num, unit="D", origin="1899-12-30")
+            return f"{meses_es[fecha.month - 1]} {fecha.year}"
+    except Exception:
+        pass
+    return s
+
 def _mes_a_numero(mes_val):
     s = str(mes_val).strip().upper()
     if s.isdigit():
@@ -456,6 +470,10 @@ def cargar_datos_resumen_pax(nombre_hoja="PASAJEROS EMBARCADOS DGAC"):
     df = df.loc[:, ~df.columns.str.upper().str.startswith("UNNAMED")].copy()
     df = df[df.apply(lambda row: any(str(v).strip() not in ["", "nan", "None"] for v in row), axis=1)].reset_index(drop=True)
 
+    col_mes = next((c for c in df.columns if "MES" in c.upper()), None)
+    if col_mes:
+        df[col_mes] = df[col_mes].apply(_formatear_mes_anio_pax)
+
     cols_texto = [
         c for c in df.columns
         if ("MES" in c.upper() or "CARTA" in c.upper() or "OFICIO" in c.upper())
@@ -467,7 +485,6 @@ def cargar_datos_resumen_pax(nombre_hoja="PASAJEROS EMBARCADOS DGAC"):
         else:
             df[col] = df[col].apply(_limpiar_numero_pax)
 
-    col_mes = next((c for c in df.columns if "MES" in c.upper()), None)
     if col_mes:
         df = df[~df[col_mes].str.upper().str.contains("TOTAL|ACUMULADO", na=False)].reset_index(drop=True)
         df["Año_Filtro"] = df[col_mes].astype(str).str.extract(r'(20\d{2})')[0].fillna("Sin Año")
