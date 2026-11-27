@@ -495,6 +495,8 @@ def cargar_datos_resumen_pax(nombre_hoja="PASAJEROS EMBARCADOS DGAC"):
     if col_mes:
         df = df[~df[col_mes].str.upper().str.contains("TOTAL|ACUMULADO", na=False)].reset_index(drop=True)
         df["Año_Filtro"] = df[col_mes].astype(str).str.extract(r'(20\d{2})')[0].fillna("Sin Año")
+        if (df["Año_Filtro"] != "Sin Año").any():
+            df = df[df["Año_Filtro"] != "Sin Año"].reset_index(drop=True)
     else:
         df["Año_Filtro"] = "Sin Año"
 
@@ -756,7 +758,6 @@ with tab_resumen_amb:
                 st.warning("La hoja 'PASAJEROS EMBARCADOS DGAC' se conectó correctamente, pero actualmente no tiene registros.")
             else:
                 col_mes = next((c for c in df_pax.columns if "MES" in c.upper()), df_pax.columns[0])
-                col_oficio = next((c for c in df_pax.columns if "CARTA" in c.upper() or "OFICIO" in c.upper()), None)
                 col_tot_dom = next((c for c in df_pax.columns if "TOTAL DOM" in c.upper()), None)
                 col_tot_int = next((c for c in df_pax.columns if "TOTAL INT" in c.upper()), None)
                 col_tot_emb = next((c for c in df_pax.columns if "EMBARCADOS" in c.upper()), None)
@@ -792,7 +793,7 @@ with tab_resumen_amb:
                     df_pax_filt = df_base_meses.copy()
                     etiqueta_periodo_pax = "Acumulado Histórico" if anio_sel == "Todos los Años" else f"Año {anio_sel}"
 
-                # --- BLOQUE KPI 1: TOTAL HISTÓRICO / PERÍODO FILTRADO ---
+                # --- BLOQUE KPI: TOTAL HISTÓRICO / PERÍODO FILTRADO ---
                 tot_dom = pd.to_numeric(df_pax_filt[col_tot_dom], errors="coerce").fillna(0).sum() if col_tot_dom else 0.0
                 tot_int = pd.to_numeric(df_pax_filt[col_tot_int], errors="coerce").fillna(0).sum() if col_tot_int else 0.0
                 tot_emb = pd.to_numeric(df_pax_filt[col_tot_emb], errors="coerce").fillna(0).sum() if col_tot_emb else 0.0
@@ -804,22 +805,6 @@ with tab_resumen_amb:
                 k2.metric("🌎 Total Internacional", f"{tot_int:,.0f}".replace(",", "."))
                 k3.metric("🛫 Total Embarcados", f"{tot_emb:,.0f}".replace(",", "."))
                 k4.metric("✅ Pasajeros Ajustados", f"{tot_aju:,.0f}".replace(",", "."))
-
-                # --- BLOQUE KPI 2: ÚLTIMO MES CARGADO EN LA BASE ---
-                ultima_fila = df_pax.iloc[-1]
-                ult_mes_nombre = str(ultima_fila[col_mes])
-                ult_oficio_txt = f" | {ultima_fila[col_oficio]}" if col_oficio and str(ultima_fila[col_oficio]).strip() else ""
-                ult_dom = float(ultima_fila[col_tot_dom]) if col_tot_dom else 0.0
-                ult_int = float(ultima_fila[col_tot_int]) if col_tot_int else 0.0
-                ult_emb = float(ultima_fila[col_tot_emb]) if col_tot_emb else 0.0
-                ult_aju = float(ultima_fila[col_tot_aju]) if col_tot_aju else 0.0
-
-                st.subheader(f"🗓️ Último Mes Cargado: {ult_mes_nombre}{ult_oficio_txt}")
-                u1, u2, u3, u4 = st.columns(4)
-                u1.metric("🇨🇱 Doméstico (Último Mes)", f"{ult_dom:,.0f}".replace(",", "."))
-                u2.metric("🌎 Internacional (Último Mes)", f"{ult_int:,.0f}".replace(",", "."))
-                u3.metric("🛫 Embarcados (Último Mes)", f"{ult_emb:,.0f}".replace(",", "."))
-                u4.metric("✅ Ajustados (Último Mes)", f"{ult_aju:,.0f}".replace(",", "."))
 
                 st.divider()
 
