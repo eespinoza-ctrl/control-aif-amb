@@ -136,11 +136,15 @@ def _agregar_tabla_antecedentes(doc, filas_datos):
     return tabla
 
 def _insertar_evidencia_fotografica(celda_foto, fotos_raw):
+    from PIL import Image
     p_foto = celda_foto.paragraphs[0]
     _aplicar_fuente(p_foto.add_run("EVIDENCIA FOTOGRÁFICA\n"), negrita=True)
 
     if pd.notna(fotos_raw) and "drive.google.com" in str(fotos_raw):
         lista_fotos = str(fotos_raw).split(',')
+        creds = _obtener_credenciales_drive()
+        session = AuthorizedSession(creds)
+
         for i, link in enumerate(lista_fotos):
             link = link.strip()
             if i > 0:
@@ -154,20 +158,33 @@ def _insertar_evidencia_fotografica(celda_foto, fotos_raw):
                     file_id = None
 
                 if file_id:
-                    url_directa = f"https://drive.google.com/uc?id={file_id}"
-                    respuesta = requests.get(url_directa, timeout=15)
-                    if respuesta.status_code == 200:
+                    # 1. Descarga autenticada vía API oficial de Google Drive
+                    url_api = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+                    respuesta = session.get(url_api, timeout=20)
+
+                    # 2. Respaldo por enlace directo si no está compartida con la cuenta de servicio
+                    if respuesta.status_code != 200 or "text/html" in respuesta.headers.get("Content-Type", ""):
+                        respuesta = requests.get(f"https://drive.google.com/uc?export=download&id={file_id}", timeout=20)
+
+                    if respuesta.status_code == 200 and "text/html" not in respuesta.headers.get("Content-Type", ""):
+                        # 3. Normaliza cualquier formato (WebP, PNG, RGBA) a JPEG compatible con Word
+                        img = Image.open(io.BytesIO(respuesta.content))
+                        if img.mode in ("RGBA", "P"):
+                            img = img.convert("RGB")
+                        img_bytes = io.BytesIO()
+                        img.save(img_bytes, format="JPEG", quality=85)
+                        img_bytes.seek(0)
+
                         run_foto = p_foto.add_run()
-                        run_foto.add_picture(io.BytesIO(respuesta.content), width=Inches(2.8))
+                        run_foto.add_picture(img_bytes, width=Inches(2.8))
                     else:
-                        _aplicar_fuente(p_foto.add_run(f"\n(No se pudo descargar. Link: {link})"))
+                        _aplicar_fuente(p_foto.add_run(f"\n(Sin permiso de acceso en Drive. Link: {link})"))
                 else:
                     _aplicar_fuente(p_foto.add_run(f"\n(Link no reconocido: {link})"))
             except Exception as e:
                 _aplicar_fuente(p_foto.add_run(f"\n(Error al procesar foto: {e})"))
     else:
         _aplicar_fuente(p_foto.add_run("\nSin registro fotográfico adjunto."))
-
 def _agregar_bloque_campos(celda, bloques):
     p = celda.paragraphs[0]
     for idx_b, (titulo_b, campos) in enumerate(bloques):
